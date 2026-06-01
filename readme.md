@@ -13,7 +13,12 @@
 - **100% 离线，隐私无忧** - 所有语音识别在本地完成，不上传任何数据
 - **旗舰级识别引擎** - 基于 FunASR Paraformer 模型，中英混合输入精准
 - **PTT 按键说话** - 按住 F9 说话，松开自动识别并输入；`Shift+F9` 支持长句润色模式
+- **Shift 中英切换** - 点按 Shift 键在中文/英文输入模式间切换，无需切换输入法
 - **语音编辑（IBus）** - `Ctrl+F9` 进入编辑指令模式，可改写/替换/插入/删除/导航/撤销重做
+- **ASR 后处理** - 拼音模糊匹配 + 替换词典，自动校正同音错字（如"奇安信"）
+- **GPU 加速** - 支持 CUDA GPU 推理，int8 量化 ONNX 模型比 PyTorch 快 42%
+- **热词偏置** - 专有名词编码偏置，提升关键术语识别准确率
+- **可选 Whisper 引擎** - 支持切换 faster-whisper 作为 ASR 引擎
 - **轻量化设计** - 仅需 700MB 内存，纯 CPU 推理，无需显卡
 - **0.1 秒级响应** - 感受所言即所得的畅快体验
 - **可选 Rime 集成** - 需要拼音时可启用 Rime，无需切换输入法
@@ -188,15 +193,21 @@ fcitx5 -r
 ```
 VoCoType Linux
 ├── app/                    # 核心引擎（共享）
-│   ├── funasr_server.py    # 语音识别（FunASR）
+│   ├── funasr_server.py    # 语音识别（FunASR / ONNX）
+│   ├── whisper_server.py   # 语音识别（Whisper / faster-whisper）
+│   ├── text_postprocessor.py  # ASR 后处理管线
+│   ├── config.py           # 配置定义
+│   ├── funasr_config.py    # 模型配置
 │   └── ...
 ├── ibus/                   # IBus 版本
-│   ├── engine.py           # IBus 引擎
+│   ├── engine.py           # IBus 引擎（含 Shift 中英切换）
 │   └── README.md
-└── fcitx5/                 # Fcitx 5 版本
-    ├── addon/              # C++ Addon
-    ├── backend/            # Python 后端
-    └── README.md
+├── fcitx5/                 # Fcitx 5 版本
+│   ├── addon/              # C++ Addon
+│   ├── backend/            # Python 后端
+│   └── README.md
+└── docs/
+    └── MODIFICATIONS.md    # 功能增强与修改说明
 ```
 
 IBus 和 Fcitx 5 是**并列独立**的实现，共享 VoCoType 核心（语音识别、音频采集）。
@@ -284,6 +295,7 @@ python scripts/benchmark_slm_pipeline.py ./samples \
 - [IBus 版本安装指南](ibus/README.md)
 - [Fcitx 5 版本安装指南](fcitx5/README.md)
 - [Rime 拼音配置指南](RIME_CONFIG_GUIDE.md)（可选功能）
+- [功能增强与修改说明](docs/MODIFICATIONS.md)（本 Fork 的新功能和配置详解）
 
 ---
 
@@ -318,6 +330,8 @@ python scripts/benchmark_slm_pipeline.py ./samples \
 - `iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx`
 - `iic/speech_fsmn_vad_zh-cn-16k-common-onnx`
 - `iic/punc_ct-transformer_zh-cn-common-vocab272727-onnx`
+- `JunHowie/speech_paraformer-large-contextual_asr_nat-zh-cn-16k-common-vocab8404`（本 Fork：GPU + 热词偏置）
+- `Systran/faster-whisper-medium`（本 Fork：可选的 Whisper 引擎）
 
 ## 📄 许可证
 

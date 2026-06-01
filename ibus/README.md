@@ -5,6 +5,8 @@ VoCoType 离线语音输入法的 IBus 版本实现。
 ## 功能特性
 
 - **语音输入** - 按住 F9 说话，松开自动识别并输入；`Shift+F9` 为长句模式（可选 SLM 润色）
+- **Shift 中英切换** - 点按 Shift 在中文/英文输入模式间切换
+- **ASR 后处理** - 拼音模糊匹配校正专有名词，替换词典展开缩写
 - **语音编辑** - `Ctrl+F9` 读取输入框上下文并执行语音编辑指令（替换/删除/插入/导航/撤销重做）
 - **上下文探针** - `Ctrl+Shift+F9` 输出 surrounding 调试信息，便于验证不同应用兼容性
 - **Rime 拼音** - 完整版支持 Rime 拼音输入
@@ -108,7 +110,10 @@ ibus restart
    - 按住 `Shift+F9`：长句模式（ASR + 标点 + 可选 SLM 润色）
    - 按住 `Ctrl+F9`：语音编辑模式（读取 surrounding + 识别编辑指令）
    - 按住 `Ctrl+Shift+F9`：输出 surrounding 探针信息
-3. **拼音输入**（完整版）: 直接打字，Rime 处理并显示候选词
+3. **中英切换**:
+   - 点按 `Shift`：在中文（Rime）和英文（直接输入）模式间切换
+   - 切换时底部显示 `⌨ 中` / `⌨ 英` 提示
+4. **拼音输入**（完整版）: 直接打字，Rime 处理并显示候选词
 
 ## Rime 配置
 
@@ -145,6 +150,62 @@ PTT_KEYVAL = IBus.KEY_F9  # 修改为其他按键
 ```
 
 可选按键：`IBus.KEY_F8`, `IBus.KEY_F10`, `IBus.KEY_Control_L` 等
+
+### ASR 后处理配置（本 Fork 新功能）
+
+`F9` / `Shift+F9` 识别结果会经过后处理管线校正后提交。
+
+**专有名词拼音匹配** — 在 `~/.config/vocotype/proper_nouns.json` 中配置：
+
+```json
+[
+  "卷积神经网络",
+  "吴恩达"
+]
+```
+
+识别结果中的同音错字（如"卷机神经网路"）会被自动校正。
+
+**替换词典** — 在 `~/.config/vocotype/replacements.json` 中配置：
+
+```json
+{
+  "AI": "人工智能",
+  "GPU": "图形处理器"
+}
+```
+
+缩写自动展开。
+
+**启用/禁用** — 在 `~/.config/vocotype/ibus.json` 中：
+
+```json
+{
+  "postprocessor": {
+    "enabled": true,
+    "proper_nouns_path": "~/.config/vocotype/proper_nouns.json",
+    "replacements_path": "~/.config/vocotype/replacements.json"
+  }
+}
+```
+
+### ASR 引擎切换（本 Fork 新功能）
+
+在 `~/.config/vocotype/ibus.json` 中切换：
+
+```json
+{
+  "asr_engine": "whisper",
+  "whisper": {
+    "model": "Systran/faster-whisper-medium"
+  }
+}
+```
+
+- `"funasr"`（默认）— 使用 FunASR ContextualParaformer（GPU + 热词偏置）
+- `"whisper"` — 使用 faster-whisper（需先下载模型）
+
+详细说明：[docs/MODIFICATIONS.md](../docs/MODIFICATIONS.md)
 
 ### 长句模式（Shift+F9）配置
 

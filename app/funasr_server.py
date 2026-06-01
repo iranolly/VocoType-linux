@@ -25,10 +25,11 @@ os.environ.setdefault("OMP_NUM_THREADS", "8")  # ONNX 推理并行线程数，�
 # 默认使用 CPU 进行推理；如需使用 GPU，可在外部设置环境变量 FUNASR_DEVICE=cuda:0
 os.environ.setdefault("FUNASR_DEVICE", "cpu")
 
-from app.funasr_config import MODEL_REVISION, MODELS
+from app.funasr_config import MODEL_REVISION, MODELS, is_contextual_model
 from app.download_models import get_model_cache_path
 from app.logging_config import setup_logging
 from app.text_normalizer import normalize_text
+from app.text_postprocessor import TextPostProcessor
 
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,13 @@ class FunASRServer:
             "vad": MODELS["vad"]["name"],
             "punc": MODELS["punc"]["name"],
         }
+
+        self._is_contextual = is_contextual_model(self.model_names["asr"])
+        # ASR 后处理管线（专有名词匹配 + 替换词典）
+        self._post_processor = TextPostProcessor(
+            proper_nouns_path=os.path.expanduser("~/.config/vocotype/proper_nouns.json"),
+            replacements_path=os.path.expanduser("~/.config/vocotype/replacements.json"),
+        )
 
         self.device = self._select_device()
         logger.info(
@@ -120,9 +128,40 @@ class FunASRServer:
     def _load_asr_model(self):
         """加载ASR模型"""
         try:
+            model_dir = self.model_names["asr"]
+            
+            # 优先检测模型目录下是否有 ONNX 文件（本地已导出）
+            _quant_bb = os.path.join(model_dir, "model_quant.onnx")
+            _quant_eb = os.path.join(model_dir, "model_eb_quant.onnx")
+            _bb = os.path.join(model_dir, "model.onnx")
+            _eb = os.path.join(model_dir, "model_eb.onnx")
+
+            has_onnx = (os.path.exists(_quant_bb) and os.path.exists(_quant_eb)) or \
+                       (os.path.exists(_bb) and os.path.exists(_eb))
+            
+            if has_onnx:
+                from funasr_onnx.paraformer_bin import ContextualParaformer
+
+                logger.info("开始加载本地 ONNX ContextualParaformer: %s", model_dir)
+                use_quant = os.path.exists(_quant_bb) and os.path.exists(_quant_eb)
+                self.asr_model = ContextualParaformer(
+                    str(model_dir),
+                    batch_size=1,
+                    device_id=0,
+                    quantize=use_quant,
+                    intra_op_num_threads=8,
+                )
+                self._is_contextual = True
+                logger.info(
+                    "ONNX ContextualParaformer 加载完成 (quantize=%s, device=cuda:0)",
+                    use_quant,
+                )
+                return True
+
+            # 以下为旧 ONNX 和 PyTorch 路径
             model_name_lower = str(self.model_names["asr"]).lower()
             
-            # 如果是 ONNX 模型，使用 funasr_onnx 专用加载器
+            # 如果是 ONNX 模型（ModelScope 来源），使用 funasr_onnx 专用加载器
             if "onnx" in model_name_lower:
                 from funasr_onnx.paraformer_bin import Paraformer
 
@@ -152,22 +191,66 @@ class FunASRServer:
                         device_id = int(self.device.split(":")[-1])
                     except Exception:
                         device_id = 0
-                
-                # 性能优化参数
+
                 num_threads = int(os.environ.get("OMP_NUM_THREADS", "8"))
 
-                self.asr_model = Paraformer(
-                    str(model_dir),
-                    batch_size=1,
-                    device_id=device_id,
-                    quantize=use_quantize,
-                    intra_op_num_threads=num_threads,  # 线程并行加速
-                )
-                logger.info("ASR ONNX模型加载完成")
+                # 检查是否有 model_eb.onnx（ContextualParaformer 热词偏置模型）
+                has_eb_file = os.path.exists(os.path.join(model_dir, "model_eb.onnx"))
+                if has_eb_file:
+                    from funasr_onnx.paraformer_bin import ContextualParaformer
+
+                    self.asr_model = ContextualParaformer(
+                        str(model_dir),
+                        batch_size=1,
+                        device_id=device_id,
+                        quantize=use_quantize,
+                        intra_op_num_threads=num_threads,
+                    )
+                    self._is_contextual = True
+                    logger.info("ContextualParaformer ONNX模型加载完成（支持热词编码偏置）")
+                else:
+                    self.asr_model = Paraformer(
+                        str(model_dir),
+                        batch_size=1,
+                        device_id=device_id,
+                        quantize=use_quantize,
+                        intra_op_num_threads=num_threads,
+                    )
+                    self._is_contextual = False
+                    logger.info("ASR ONNX模型加载完成（标准 Paraformer）")
                 return True
             else:
-                logger.error("仅支持 ONNX 模型加载，当前模型名称: %s", self.model_names["asr"]) 
-                return False
+                # PyTorch 模型：使用 funasr AutoModel（支持 GPU + 热词）
+                logger.info("开始加载PyTorch ASR模型: %s", self.model_names["asr"])
+                try:
+                    from funasr import AutoModel
+                except ImportError:
+                    logger.error(
+                        "PyTorch ASR 需要安装 funasr 包: pip install funasr"
+                    )
+                    return False
+
+                try:
+                    self.asr_model = AutoModel(
+                        model=self.model_names["asr"],
+                        vad_model=None,
+                        punc_model=None,
+                        device=self.device or "cpu",
+                        disable_update=True,
+                    )
+                except Exception as e:
+                    logger.error("PyTorch ASR 模型加载失败: %s", e)
+                    logger.debug(traceback.format_exc())
+                    return False
+
+                self._is_contextual = is_contextual_model(self.model_names["asr"])
+                logger.info(
+                    "PyTorch ASR模型加载完成: %s (contextual=%s, device=%s)",
+                    self.model_names["asr"],
+                    self._is_contextual,
+                    self.device,
+                )
+                return True
                 
         except Exception as e:
             logger.error(f"ASR模型加载失败: {str(e)}")
@@ -490,7 +573,26 @@ class FunASRServer:
 
             # 执行ASR识别（根据模型类型使用不同接口）
             try:
-                if hasattr(self.asr_model, "generate"):
+                if self._is_contextual:
+                    # ContextualParaformer / SeacoParaformer 在编码阶段做热词偏置
+                    hotword_str = self._load_hotwords()
+                    explicit_hotword = default_options.get("hotword", "")
+                    if explicit_hotword:
+                        hotword_str = (hotword_str + " " + explicit_hotword).strip()
+                    if hotword_str:
+                        logger.info("传入热词编码偏置: %s", hotword_str[:200])
+
+                    if hasattr(self.asr_model, "generate"):
+                        # PyTorch AutoModel（Contextual Paraformer）
+                        asr_result = self.asr_model.generate(
+                            input=audio_path_for_asr,
+                            hotword=hotword_str,
+                            cache={},
+                        )
+                    else:
+                        # ONNX ContextualParaformer
+                        asr_result = self.asr_model([audio_path_for_asr], hotwords=hotword_str)
+                elif hasattr(self.asr_model, "generate"):
                     # PyTorch 模型使用 generate 方法
                     asr_result = self.asr_model.generate(
                         input=audio_path_for_asr,
@@ -508,8 +610,11 @@ class FunASRServer:
                     except OSError:
                         logger.debug("删除VAD临时文件失败: %s", tmp_vad_path)
 
-            # 提取识别文本（兼容 PyTorch 和 ONNX 两种格式）
-            if isinstance(asr_result, list) and len(asr_result) > 0:
+            # 提取识别文本（兼容 PyTorch AutoModel、PyTorch generate、ONNX 三种格式）
+            if isinstance(asr_result, dict):
+                # AutoModel.generate() 格式: {"text": "...", ...}
+                raw_text = asr_result.get("text", str(asr_result))
+            elif isinstance(asr_result, list) and len(asr_result) > 0:
                 first_item = asr_result[0]
                 # PyTorch 格式: [{"text": "..."}]
                 if isinstance(first_item, dict) and "text" in first_item:
@@ -547,6 +652,25 @@ class FunASRServer:
                     final_text,
                     convert_chinese_numbers=True,
                 )
+
+            # ASR 后处理：专有名词拼音匹配 + 替换词典
+            if final_text.strip():
+                self._post_processor.reload()
+                processed = self._post_processor.process(final_text)
+                if processed != final_text:
+                    logger.info(
+                        "ASR 后处理: '%s' → '%s'",
+                        final_text[:100],
+                        processed[:100],
+                    )
+                final_text = processed
+
+            # 移除末尾标点：句号、逗号
+            if final_text:
+                cleaned = final_text.rstrip("。，.,")
+                if cleaned != final_text:
+                    logger.info("移除末尾标点: '%s' → '%s'", final_text[:100], cleaned[:100])
+                    final_text = cleaned
 
             self.transcription_count += 1
 
@@ -636,6 +760,37 @@ class FunASRServer:
                     
         except Exception as e:
             logger.warning(f"librosa预热失败（不影响使用）: {str(e)}")
+
+    def _load_hotwords(self) -> str:
+        """从 proper_nouns.json 加载中文热词，返回空格分隔的字符串。
+
+        英文热词在 ContextualParaformer 中会变成 <unk>（不在 vocab 中），
+        因此只传入中文热词。英文纠正由后处理的 ProperNounMatcher 处理。
+        """
+        import json
+
+        path = os.path.expanduser("~/.config/vocotype/proper_nouns.json")
+        if not os.path.exists(path):
+            return ""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                words = json.load(f)
+            if not isinstance(words, list):
+                return ""
+            # 只取包含中文字符的热词
+            chinese_words = []
+            for w in words:
+                w = str(w).strip()
+                if w and any("\u4e00" <= c <= "\u9fff" for c in w):
+                    chinese_words.append(w)
+            result = " ".join(chinese_words)
+            if result:
+                logger.debug("加载热词: %s", result[:200])
+            return result
+        except Exception as e:
+            logger.warning("加载热词失败: %s", e)
+            return ""
+
     
     def _cleanup_memory(self):
         """生产环境内存清理"""

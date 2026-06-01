@@ -17,6 +17,8 @@ import numpy as np
 
 from .audio_capture import AudioCapture
 from .config import ensure_logging_dir, load_config
+# 切换到 FunASR + GPU
+os.environ["FUNASR_DEVICE"] = "cuda:0"
 from app.funasr_server import FunASRServer
 
 

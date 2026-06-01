@@ -65,6 +65,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "edit_max_tokens": 256,
         "api_key": "",
     },
+    "postprocessor": {
+        "enabled": True,
+        "proper_nouns_path": "~/.config/vocotype/proper_nouns.json",
+        "replacements_path": "~/.config/vocotype/replacements.json",
+    },
     "output": {
         "dedupe": True,
         "max_history": 5,

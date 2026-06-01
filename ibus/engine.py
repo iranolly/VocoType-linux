@@ -175,7 +175,9 @@ class VoCoTypeEngine(IBus.Engine):
         # 如果未安装 pyrime，则禁用 Rime 集成
         self._rime_session: Optional[RimeSession] = None
         self._rime_available = self._check_rime_available()
-        self._rime_enabled = self._rime_available  # 只有 pyrime 可用时才启用
+        self._rime_enabled = self._rime_available
+        self._rime_raw_buffer: list[str] = []
+        self._shift_tap_pending: bool = False
         self._rime_init_lock = threading.Lock()
         self._client_capabilities = 0
         self._window_context_cache = "window=unavailable(reason=not-collected)"
@@ -698,6 +700,7 @@ class VoCoTypeEngine(IBus.Engine):
         self._log_lifecycle("focus-out", include_surrounding=False)
         if self._is_recording:
             self._stop_recording()
+        self._rime_raw_buffer.clear()
         # 清除 Rime 组合
         if self._rime_session:
             try:
@@ -820,12 +823,56 @@ class VoCoTypeEngine(IBus.Engine):
                 self._probe_surrounding_text()
             return True
 
+        # Shift 键：松开时检测点按（避免 Shift+字母误触发）
+        is_shift_key = keyval in (IBus.KEY_Shift_L, IBus.KEY_Shift_R)
+        if is_shift_key and self._rime_available:
+            if not is_release:
+                # Shift 按下：标记为"待定点按"，稍后松键才决定
+                has_ctrl = bool(state & IBus.ModifierType.CONTROL_MASK)
+                has_alt = bool(state & IBus.ModifierType.MOD1_MASK)
+                has_super = bool(state & (IBus.ModifierType.SUPER_MASK | IBus.ModifierType.MOD4_MASK))
+                self._shift_tap_pending = not (has_ctrl or has_alt or has_super)
+                return True
+            else:
+                # Shift 松开：如果期间没有按其他键，视为点按
+                if self._shift_tap_pending:
+                    self._shift_tap_pending = False
+                    logger.info(
+                        "Shift tap detected: rime_enabled=%s buffer=%s",
+                        self._rime_enabled, "".join(self._rime_raw_buffer),
+                    )
+                    if self._rime_enabled and self._rime_raw_buffer:
+                        raw_text = "".join(self._rime_raw_buffer)
+                        self._rime_raw_buffer.clear()
+                        if self._rime_session:
+                            try:
+                                self._rime_session.clear_composition()
+                            except Exception:
+                                pass
+                        self.hide_lookup_table()
+                        self._clear_preedit()
+                        self.commit_text(IBus.Text.new_from_string(raw_text))
+                        logger.info("Shift 提交原始按键: %s", raw_text)
+                    self._rime_enabled = not self._rime_enabled
+                    mode = "英" if not self._rime_enabled else "中"
+                    self._update_auxiliary_status(f"⌨ {mode}")
+                    GLib.timeout_add(1500, self._clear_auxiliary_text)
+                    return True
+                self._shift_tap_pending = False
+                return False  # Shift release 不消耗，应用可见
+
+        # 非 Shift 按键按下时取消待定点按（用户在使用组合键）
+        if not is_release and not is_ptt_key:
+            self._shift_tap_pending = False
+
         if not is_ptt_key:
             if self._is_ibus_switch_hotkey(keyval, state):
                 return False
             return self._forward_key_to_rime(keyval, keycode, state)
 
+        # F9 按下时也取消待定点按
         if not is_release:
+            self._shift_tap_pending = False
             # F9按下 -> 开始录音
             long_mode = bool(state & IBus.ModifierType.SHIFT_MASK)
             if not self._is_recording:
@@ -1606,6 +1653,7 @@ class VoCoTypeEngine(IBus.Engine):
             # 检查是否有提交的文本
             commit = self._rime_session.get_commit()
             if commit and commit.text:
+                self._rime_raw_buffer.clear()
                 self._clear_preedit()
                 self.hide_lookup_table()
                 self.commit_text(IBus.Text.new_from_string(commit.text))
@@ -1614,8 +1662,22 @@ class VoCoTypeEngine(IBus.Engine):
             # 更新预编辑和候选词
             context = self._rime_session.get_context()
             if context:
+                composition = getattr(context, "composition", None)
+                preedit = composition.preedit if composition and composition.preedit else ""
+                if preedit:
+                    # Rime 有组合 → 缓存原始按键
+                    if keyval == IBus.KEY_BackSpace:
+                        if self._rime_raw_buffer:
+                            self._rime_raw_buffer.pop()
+                    elif 32 <= keyval < 256:
+                        ch = chr(keyval).lower()
+                        if 'a' <= ch <= 'z' or '0' <= ch <= '9':
+                            self._rime_raw_buffer.append(ch)
+                else:
+                    self._rime_raw_buffer.clear()
                 self._update_rime_ui(context)
             else:
+                self._rime_raw_buffer.clear()
                 self._clear_preedit()
                 self.hide_lookup_table()
 
